@@ -5,6 +5,10 @@ import numpy as np
 import sys
 import time
 from tqdm import tqdm
+import random
+import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
+from tensorboardX import SummaryWriter
 
 
 class AverageMeter(object):
@@ -26,11 +30,11 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def validate(val_loader, distiller):
+def validate(val_loader, distiller, tqdm_leave):
     batch_time, losses, top1, top5 = [AverageMeter() for _ in range(4)]
     criterion = nn.CrossEntropyLoss()
     num_iter = len(val_loader)
-    pbar = tqdm(range(num_iter))
+    pbar = tqdm(range(num_iter), leave=tqdm_leave)
 
     distiller.eval()
     with torch.no_grad():
@@ -106,9 +110,9 @@ def validate_npy(val_loader, distiller):
 
 def log_msg(msg, mode="INFO"):
     color_map = {
-        "INFO": 36,
-        "TRAIN": 32,
-        "EVAL": 31,
+        "INFO": "1;36",
+        "TRAIN": "1;32",
+        "EVAL": "1;31",
     }
     msg = "\033[{}m[{}] {}\033[0m".format(color_map[mode], mode, msg)
     return msg
@@ -145,4 +149,91 @@ def save_checkpoint(obj, path):
 
 def load_checkpoint(path):
     with open(path, "rb") as f:
-        return torch.load(f, map_location="cpu")
+        return torch.load(f, map_location="cpu", weights_only=False)
+
+
+def set_seed(seed=None):
+    """Set the seed for reproducibility."""
+    if seed is None:
+        seed = torch.initial_seed() % (2**32)  # Generate a default seed if not provided
+        print(f"Seed not provided. Using generated seed: {seed}")
+    else:
+        print(f"Using provided seed: {seed}")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU environments
+    torch.backends.cudnn.deterministic = True  # Ensures reproducibility
+    torch.backends.cudnn.benchmark = False
+    return seed
+
+
+def init_optimizer(model, cfg):
+    if cfg.SOLVER.TYPE == "SGD":
+        optimizer = optim.SGD(
+            model.get_learnable_parameters(),
+            lr=cfg.SOLVER.LR,
+            momentum=cfg.SOLVER.MOMENTUM,
+            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+        )
+    else:
+        raise NotImplementedError(f"Optimizer {cfg.SOLVER.TYPE} not implemented.")
+    return optimizer
+
+def init_scheduler(optimizer, cfg):
+    if cfg.SOLVER.SCHEDULER == "cosine":
+        return lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.SOLVER.EPOCHS,
+            eta_min=1e-5
+        )
+    elif cfg.SOLVER.SCHEDULER == "step":
+        return lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=cfg.SOLVER.LR_DECAY_STAGES,  # ex) [30, 60, 90]
+            gamma=cfg.SOLVER.LR_DECAY_RATE  # ex) 0.1
+        )
+    else:
+        raise ValueError(f"Unknown scheduler type: {cfg.SOLVER.SCHEDULER}")
+
+def get_lr(optimizer):
+    return optimizer.param_groups[0]['lr']
+
+
+
+def setup_logger(log_path):
+    if not os.path.exists(log_path):
+        os.makedirs(log_path)
+    return SummaryWriter(os.path.join(log_path, "train.events"))
+
+def log_training(writer, log_path, lr, epoch, log_dict, best_acc, wandb_enabled=False):
+    # TensorBoard Logging
+    for k, v in log_dict.items():
+        writer.add_scalar(k, v, epoch)
+    writer.flush()
+
+    # Update best accuracy
+    if log_dict["test_acc"] > best_acc:
+        best_acc = log_dict["test_acc"]
+
+    # WandB Logging
+    if wandb_enabled:
+        import wandb
+        wandb.log({"current lr": lr})
+        wandb.log(log_dict)
+        if log_dict["test_acc"] > best_acc:
+            wandb.run.summary["best_acc"] = best_acc
+
+    # File Logging (worklog.txt)
+    with open(os.path.join(log_path, "worklog.txt"), "a") as writer:
+        lines = [
+            "-" * 25 + os.linesep,
+            f"epoch: {epoch}" + os.linesep,
+            f"lr: {lr:.6f}" + os.linesep,
+        ]
+        for k, v in log_dict.items():
+            lines.append(f"{k}: {v:.2f}" + os.linesep)
+        lines.append("-" * 25 + os.linesep)
+        writer.writelines(lines)
+
+    return best_acc

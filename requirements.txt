@@ -1,3 +1,6 @@
 torch==1.7.0
 yacs
 wandb
+scipy
+tqdm
+tensorboardX
