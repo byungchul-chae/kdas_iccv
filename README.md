@@ -72,7 +72,7 @@ python tools/train.py --cfg configs/cifar100/kd/vgg13_vgg8.yaml --logit-stand --
 ```
 
 
-# :mega: Citation
+## Citation
 
 If you find that this project helps your research, please consider citing some of the following paper:
 
